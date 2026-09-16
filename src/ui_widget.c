@@ -10,6 +10,378 @@ static void ui_widget_object_destroy(struct  UI_Object* object){
   free(widget);
   return;
 }
+static UI_SizeConstraints ui_widget_make_child_constraints(UI_Widget* parent,UI_Widget* child){
+    UI_SizeConstraints constraints={
+        0.0f,
+        0.0f,
+        0.0f,
+        0.0f
+    };
+    if(!parent || !child) return constraints;
+
+    float available_width=parent->constraint.max_width;//start from the parent's maximum constraints
+    float available_height=parent->constraint.max_height; 
+
+     /*
+     *Remove parent padding from available content area
+     *max==0 means unlimited,so keep it 0
+     */
+    if(available_width>0.0f){
+        available_width-=parent->padding.left+parent->padding.right;
+        if(available_width<0.0f) available_width=0.0f;
+    }
+    
+    if(available_height>0.0f){
+        available_height-=parent->padding.top+parent->padding.bottom;
+        if(available_height<0.0f) available_height=0.0f;
+    }
+    /*Determine constraints based on the parent's layout direction
+    */
+    if(parent->layout_type==UI_LAYOUT_VERTICAL){
+        /**
+         *Width is the main cross axis 
+         * Height is the main axis
+         *
+         */
+        constraints.max_width=available_width;
+        constraints.max_height=0.0f;
+    }
+    else if(parent->layout_type==UI_LAYOUT_HORIZONTAL){
+         /**
+         *Height is the main cross axis 
+         * Width is the main axis
+         *
+         */
+        constraints.max_height=available_height;
+        constraints.max_width=0.0f;
+    }
+    else{
+         /**
+         *No layout direction 
+         *Both dimensions inherit the available available constraints;
+         
+         */
+        constraints.max_width=available_width;
+        constraints.max_height=available_height;
+    }
+    /*
+    Start with the child's own minimum limit
+    */
+    constraints.min_width=child->size_limits.min_width;
+    constraints.min_height=child->size_limits.min_height;
+    /*Child maximum width
+    */
+    if(child->size_limits.max_width>0.0){
+        if(constraints.max_width==0.0f || child->size_limits.max_width<constraints.max_width){
+            constraints.max_width=child->size_limits.max_width;
+        }
+    }
+    /*
+    Child maximum height
+    */
+    if(child->size_limits.max_height>0.0){
+        if(constraints.max_height==0.0f || child->size_limits.max_height<constraints.max_height){
+            constraints.max_height=child->size_limits.max_height;
+        }
+    }
+    /*
+    *FIXED WIDTH
+    *A fixed dimension is both its minimum and maximum measurement constraint
+    
+    */
+    if(child->width_mode== UI_SIZE_FIXED){
+        constraints.min_width=child->preferred_size.width;
+        constraints.max_width=child->preferred_size.width;
+    }
+    /*
+    Fixed Height
+
+    */
+    if(child->height_mode==UI_SIZE_FIXED){
+        constraints.min_height=child->preferred_size.height;
+        constraints.max_height=child->preferred_size.height;
+    }
+    /*
+    Ensure constraints are internally valid
+    */
+    if(constraints.max_width>0.0f && constraints.max_width< constraints.min_width){
+        constraints.max_width=constraints.min_width;
+    }
+    if(constraints.max_height>0.0f && constraints.max_height<constraints.min_height){
+        constraints.max_height=constraints.min_height;
+    }
+    return constraints;
+
+}
+static float ui_align_position(UI_Align alignment,float available,float size){
+    switch(alignment){
+        case UI_ALIGN_CENTER:{
+            return (available-size)*0.5f;
+        }
+        case UI_ALIGN_END:
+           return available-size;
+        case UI_ALIGN_START:
+          return 0.0f;
+    }
+    return 0.0f;
+}
+static float ui_widget_clamp_measure_dimension(float size,float min,float max){
+    if(size< min){
+        size=min;
+    }
+    if(max> 0.0 && size>max){
+        size=max;
+    }
+    return size;
+}
+static float ui_widget_clamp_size(float size,float min,float max){
+    if(size<min){
+        size=min;
+    }
+    if(max>0.0f && size>max){
+        size=max;
+    }
+    return size;
+}
+ UI_Size ui_widget_clamp_measure_size(UI_Size size,UI_SizeConstraints constraint){
+    size.width=ui_widget_clamp_measure_dimension(size.width,constraint.min_width,constraint.max_width);
+    size.height=ui_widget_clamp_measure_dimension(size.height,constraint.min_height,constraint.max_height);
+
+    return size;
+}
+
+static bool ui_widget_distribute_fill(UI_Widget* widget,bool vertical,float available){
+    if(!widget) return false;
+
+    size_t count=widget->object.children.count;
+    if(count==0){
+        return true;
+    }
+   float* sizes=malloc(count* sizeof(float));
+   bool* active=malloc(count* sizeof(bool));
+   if(!sizes || !active){
+    free(sizes);
+    free(active);
+    return false;
+   }
+   float fixed_space=0.0;
+   size_t fill_count=0;
+
+   for(size_t i=0;i<count;i++){
+    UI_Widget* child=(UI_Widget*)widget->object.children.objects[i];
+    sizes[i]=0.0f;
+    active[i]=false;
+    if(!child) continue;
+    if(!child->state.visible) continue;
+    
+    UI_SizeMode mode=vertical? child->height_mode:child->width_mode;
+
+    if(mode==UI_SIZE_FILL){
+        active[i]=true;
+        fill_count++;
+    }
+    
+   }
+   if(fill_count==0){
+    free(sizes);
+    free(active);
+    return true;
+   }
+    /*
+    Available space is distributed between the FILL children
+    
+    */
+   float remaining=available;
+   if(remaining<0.0f){
+    remaining=0.0;
+   }
+   size_t active_count=fill_count;
+
+   /*
+   Redistribute space until every FILL child has received its final size
+   
+   */
+
+   while(active_count>0){
+    float share=remaining/(float) active_count;
+    bool constrained=false;
+
+    for(int i=0;i<count;i++){
+        if(!active[i]) continue;
+
+        UI_Widget* child=(UI_Widget*)widget->object.children.objects[i];
+
+        if(!child){
+            active[i]=false;
+            if(active_count>0){
+            active_count--;
+            }
+            constrained=true;
+            break;
+        }
+        float minimum;
+        float maximum;
+        if(vertical){
+            minimum=child->size_limits.min_height;
+            maximum=child->size_limits.max_height;
+        }
+        else{
+            minimum=child->size_limits.min_width;
+            maximum=child->size_limits.max_width;
+        }
+       /*
+        Minimum Constraint
+       */
+      if(share<minimum){
+        sizes[i]=minimum;
+        remaining-=minimum;
+
+        if(remaining<0.0){
+            remaining=0.0;
+        }
+        active[i]=false;
+        active_count--;
+        constrained=true;
+        break;
+      }
+      /*
+      Maximum constraint
+      max==0 means unlimited
+      */
+     if(maximum>0.0 && share>maximum){
+        sizes[i]=maximum;
+        remaining-=maximum;
+
+        if(remaining<0.0f){
+            remaining=0.0f;
+        }
+        active[i]=false;
+        active_count--;
+        constrained=true;
+        break;
+     }
+
+    }
+    /*
+    Nobody hit a constraint
+    Give every remaining FILL child an equal share
+    */
+   if(!constrained){
+    for(size_t i=0;i<count;i++){
+        if(!active[i]) continue;
+
+        sizes[i]=share;
+        active[i]=false;
+    }
+    active_count=0;
+   }
+   }
+   /*
+   Apply the calculated sizes to the children
+
+   */
+  for(size_t i=0;i<count;i++){
+    if(sizes[i]<0.0f) sizes[i]=0.0f;
+
+    UI_Widget* child=(UI_Widget*)widget->object.children.objects[i];
+    if(!child) continue;
+    if(!child->state.visible) continue;
+
+    UI_SizeMode mode=vertical?child->height_mode:child->width_mode;
+
+    if(mode!=UI_SIZE_FILL){
+        continue;
+    }
+    if(vertical) child->rect.height=sizes[i];
+    else 
+       child->rect.width=sizes[i];
+     /*
+     *The distribution should already respect the relevant main-axis constraints,
+     *but apply the complete limits as a final safety check.
+     */
+       ui_widget_apply_size_limits(child);
+  }
+  free(sizes);
+  free(active);
+  sizes=NULL;
+  active=NULL;
+    return true;
+}
+
+static void ui_widget_propagate_measure_constraints(UI_Widget* root,UI_SizeConstraints constraints){
+    if(!root) return;
+
+    size_t capacity=16;
+    size_t count=0;
+
+    UI_Widget** stack=malloc(capacity * sizeof(UI_Widget*));
+
+    if(!stack){
+        free(stack);
+        return;
+    }
+    /*
+    Root receives the externally supplied constraints
+    */
+    root->constraint=constraints;
+
+    stack[count++] =root;
+
+    while(count > 0){
+        UI_Widget* widget=stack[--count];
+       if(!widget) continue;
+       if(!widget->state.visible) continue;
+       if(widget->object.children.count==0) continue;
+    
+       for(size_t i=0;i<widget->object.children.count;i++){
+         UI_Widget* child=(UI_Widget*)widget->object.children.objects[i];
+         /*
+         Ignore Null Children
+         */
+         if(!child) continue; 
+         if(!child->state.visible) return; //if it is not visible
+         /*
+          Calculate it's constraint from it's parent
+         */
+         child->constraint=ui_widget_make_child_constraints(widget,child);
+        /*
+        Grow stack when necessary
+        */
+        if(count>=capacity){
+            size_t new_capacity=capacity*2;
+            UI_Widget** new_stack=realloc(stack,new_capacity*sizeof(UI_Widget*));
+
+            if(new_stack==NULL){
+                free(stack);
+                return;
+            }
+            stack=new_stack;
+            capacity=new_capacity;
+        }
+        stack[count++]=child;
+       }
+    }
+    free(stack);
+    return;
+}
+ void ui_widget_resolve_root_size(UI_Widget* root){
+    if(!root) return;
+
+    if(root->width_mode==UI_SIZE_FIXED){
+        root->rect.width=root->preferred_size.width;
+    }
+    else if(root->width_mode==UI_SIZE_AUTO){
+        root->rect.width=root->measured_size.width;
+    }
+    if(root->height_mode==UI_SIZE_FIXED){
+        root->rect.height=root->preferred_size.height;
+    }
+    else if(root->height_mode==UI_SIZE_AUTO){
+        root->rect.height=root->measured_size.height;
+    }
+    ui_widget_apply_size_limits(root);
+    return;
+}
 
  struct UI_Widget* ui_widget_create(void){
   struct UI_Widget* widget=malloc(sizeof(struct UI_Widget));
@@ -451,7 +823,7 @@ void ui_widget_layout_tree(struct UI_Widget* widget){
 
        if(!curr_widget) continue;
        if(!curr_widget->state.visible) continue;
-       ui_widget_layout(widget);
+       ui_widget_layout(curr_widget);
         //Push children in reverse order,this keeps normal child drawing order
          if(curr_widget->object.children.count==0) continue;
 
@@ -466,6 +838,8 @@ void ui_widget_layout_tree(struct UI_Widget* widget){
              struct   UI_Widget** newstack=realloc(stack,new_capacity*sizeof(struct UI_Widget*));
                 if(!newstack){
                     free(stack);
+                    free(newstack);
+                    newstack=NULL;
                     stack=NULL;
                     return;
                 }
@@ -504,8 +878,8 @@ void ui_widget_layout_vertical(UI_Widget* widget,float spacing){
     float fixed_height=0.0f;
     size_t visible_count=0;
     //First pass:
-    //Determine fixed sizes and count fill children
-    for(int i=0;i<child_count;i++){
+    //Determine fixed sizes and count fill children(prepare the cross axis sizes)
+    for(size_t i=0;i<child_count;i++){
          UI_Object* child_object=widget->object.children.objects[i];
 
        UI_Widget* child=(UI_Widget*)(child_object);
@@ -513,14 +887,14 @@ void ui_widget_layout_vertical(UI_Widget* widget,float spacing){
        if(!child->state.visible) continue;
        visible_count++;
        UI_Size child_size=ui_widget_get_measure_size(child);
-       //Cross Axis
+       //Cross Axis:width
        if(child->width_mode==UI_SIZE_FILL){
         child->rect.width=available_width;
        }
        else{
         child->rect.width=child_size.width;
        }
-       //Main Axis
+       //Main Axis:Height
        if(child->height_mode==UI_SIZE_FILL){
         fill_count++;
        }
@@ -534,13 +908,13 @@ void ui_widget_layout_vertical(UI_Widget* widget,float spacing){
 
     
    
-    //Total space occupied by spacing
+    //Total spacing between visible children
     float total_spacing=0.0f;
 
    if(visible_count>1){
     total_spacing=spacing*(float)(visible_count-1);
    }
-    float remaining=available_height-fixed_height-total_spacing;
+   
     
     //Calculate space available for FILL children 
     float remaining= available_height-fixed_height-total_spacing;
@@ -557,7 +931,7 @@ void ui_widget_layout_vertical(UI_Widget* widget,float spacing){
    size_t positioned=0;
     
 
-    for(int i=0;i<widget->object.children.count;i++){
+    for(size_t i=0;i<widget->object.children.count;i++){
        UI_Object* child_object=widget->object.children.objects[i];
 
        UI_Widget* child=(UI_Widget*)(child_object);
@@ -568,21 +942,20 @@ void ui_widget_layout_vertical(UI_Widget* widget,float spacing){
         continue;
        }
       
-       //width of the child uses the cross axis
-         
        
-       //height uses the main axis
       
-
+        /*
+        * Final Safety clamp
+        */
         ui_widget_apply_size_limits(child);
-       //For alignment
+       //For Horizontal Alignment
         float offset_x=ui_align_position(widget->horizontal_align,available_width,child->rect.width);
 
       child->rect.x=widget->padding.left+offset_x;
        
        child->rect.y=y;
        y+=child->rect.height; //compound all heights;
-
+        
        positioned++;
        if(positioned<visible_count) y+=spacing;
     }
@@ -612,7 +985,7 @@ void ui_widget_layout_horizontal(UI_Widget* widget,float spacing){
     /*
      First Pass
     */
-    for(int i=0;i<child_count;i++){
+    for(size_t i=0;i<child_count;i++){
          UI_Object* child_object=widget->object.children.objects[i];
 
        UI_Widget* child=(UI_Widget*)(child_object);
@@ -659,7 +1032,7 @@ void ui_widget_layout_horizontal(UI_Widget* widget,float spacing){
    
 
 
-    for(int i=0;i<widget->object.children.count;i++){
+    for(size_t i=0;i<widget->object.children.count;i++){
        UI_Object* child_object=widget->object.children.objects[i];
 
        UI_Widget* child=(UI_Widget*)(child_object);
@@ -697,7 +1070,10 @@ void ui_widget_set_layout(UI_Widget* widget,UI_LayoutType type,float spacing){
 }
 void ui_widget_set_padding(UI_Widget* widget,float top,float bottom,float left,float right){
     if(!widget) return;
-
+    if(top<0.0){ top=0.0f;}
+    if(bottom<0.0){bottom=0.0f;}
+    if(left<0.0){ left=0.0f;}
+    if(right<0.0f){ right=0.0f;}
     widget->padding.top=top;
     widget->padding.right=right;
     widget->padding.bottom=bottom;
@@ -711,7 +1087,12 @@ void ui_widget_set_alignment(UI_Widget* widget,UI_Align horizontal,UI_Align vert
     if(!widget) return;
     widget->horizontal_align=horizontal;
     widget->vertical_align=vertical;
-    ui_widget_mark_measure_dirty(widget);
+    /*
+    *Alignment affects layout rather than the intrinsic measurement of the widget
+    *Keep the existing dirty mechanism,but mark the widget for layout as well
+    *
+    */
+   widget->layout_dirty=true;
     return;
 }
 
@@ -723,18 +1104,7 @@ void ui_widget_set_size_mode(UI_Widget* widget,UI_SizeMode width_mode,UI_SizeMod
     return;
 }
 
-static float ui_align_position(UI_Align alignment,float available,float size){
-    switch(alignment){
-        case UI_ALIGN_CENTER:{
-            return (available-size)*0.5f;
-        }
-        case UI_ALIGN_END:
-           return available-size;
-        case UI_ALIGN_START:
-          return 0.0f;
-    }
-    return 0.0f;
-}
+
 void ui_widget_set_limits(UI_Widget* widget,float min_width,float min_height,float max_width,float max_height){
     if(!widget) return;
     if(min_width<0.0){
@@ -791,164 +1161,15 @@ void ui_widget_set_preferred_size(UI_Widget* widget,float width,float height){
     ui_widget_mark_measure_dirty(widget);
     return;
 }
-static float ui_widget_clamp_size(float size,float min,float max){
-    if(size<min){
-        size=min;
-    }
-    if(max>0.0f && size>max){
-        size=max;
-    }
-    return size;
-}
-static void ui_widget_apply_size_limits(UI_Widget* widget){
+
+ void ui_widget_apply_size_limits(UI_Widget* widget){
     if(!widget) return;
 
     widget->rect.width=ui_widget_clamp_size(widget->rect.width,widget->size_limits.min_width,widget->size_limits.max_width);
     widget->rect.height=ui_widget_clamp_size(widget->rect.height,widget->size_limits.min_height,widget->size_limits.max_height);
     return;
 }
-static bool ui_widget_distribute_fill(UI_Widget* widget,bool vertical,float available){
-    if(!widget) return false;
 
-    size_t count=widget->object.children.count;
-    if(count==0){
-        return true;
-    }
-   float* sizes=malloc(count* sizeof(float));
-   bool* active=malloc(count* sizeof(bool));
-   if(!sizes || !active){
-    free(sizes);
-    free(active);
-    return false;
-   }
-   float fixed_space=0.0;
-   size_t fill_count=0;
-
-   for(size_t i=0;i<count;i++){
-    UI_Widget* child=(UI_Widget*)widget->object.children.objects[i];
-    sizes[i]=0.0f;
-    active[i]=false;
-    if(!child) continue;
-    if(!child->state.visible) continue;
-    
-    UI_SizeMode mode=vertical? child->height_mode:child->width_mode;
-
-    if(mode==UI_SIZE_FILL){
-        active[i]=true;
-        fill_count++;
-    }
-    
-   }
-   if(fill_count==0){
-    free(sizes);
-    free(active);
-    return true;
-   }
-    /*
-    Available space is distributed between the FILL children
-    
-    */
-   float remaining=available;
-   if(remaining<0.0f){
-    remaining=0.0;
-   }
-   size_t active_count=fill_count;
-
-   while(active_count>0){
-    float share=remaining/(float) active_count;
-    bool constrained=false;
-
-    for(int i=0;i<count;i++){
-        if(!active[i]) continue;
-        UI_Widget* child=(UI_Widget*)widget->object.children.objects[i];
-
-        if(!child){
-            active[i]=false;
-            active_count--;
-            continue;
-        }
-        float minimum;
-        float maximum;
-        if(vertical){
-            minimum=child->size_limits.min_height;
-            maximum=child->size_limits.max_height;
-        }
-        else{
-            minimum=child->size_limits.min_width;
-            maximum=child->size_limits.max_width;
-        }
-       /*
-        Minimum Constraint
-       */
-      if(share<minimum){
-        sizes[i]=minimum;
-        remaining-=minimum;
-
-        if(remaining<0.0){
-            remaining=0.0;
-        }
-        active[i]=false;
-        active_count--;
-        constrained=true;
-        break;
-      }
-      /*
-      Maximum constraint
-      max==0 means unlimited
-      */
-     if(maximum>0.0 && share<maximum){
-        sizes[i]=maximum;
-        remaining-=maximum;
-
-        if(remaining<0.0f){
-            remaining=0.0f;
-        }
-        active[i]=false;
-        active_count--;
-        constrained=true;
-        break;
-     }
-
-    }
-    /*
-    Nobody hit a constraint
-    Give every remaining FILL child an equal share
-    */
-   if(!constrained){
-    for(size_t i=0;i<count;i++){
-        if(!active[i]) continue;
-        sizes[i]=share;
-        active[i]=false;
-    }
-    active_count=0;
-   }
-   }
-   /*
-   Apply the calculated sizes to the children
-
-   */
-  for(size_t i=0;i<count;i++){
-    if(sizes[i]<0.0f) sizes[i]=0.0f;
-
-    UI_Widget* child=(UI_Widget*)widget->object.children.objects[i];
-    if(!child) continue;
-    if(!child->state.visible) continue;
-
-    UI_SizeMode mode=vertical?child->height_mode:child->width_mode;
-
-    if(mode!=UI_SIZE_FILL){
-        continue;
-    }
-    if(vertical) child->rect.height=sizes[i];
-    else 
-       child->rect.width=sizes[i];
-  }
-  free(sizes);
-  free(active);
-  sizes=NULL;
-  active=NULL;
-    return true;
-}
 
 void ui_widget_layout(UI_Widget* widget){
     if(!widget) return;
@@ -977,7 +1198,7 @@ void ui_widget_layout(UI_Widget* widget){
     return;
 }
 
-static void ui_widget_measure_self(UI_Widget* widget){
+ void ui_widget_measure_self(UI_Widget* widget){
     if(!widget) return;
 
     if(!widget->measure) return;
@@ -998,6 +1219,9 @@ void ui_widget_measure(UI_Widget* widget){
     UI_Size size={
         0.0,0.0
     };
+    /*
+    *A widget's own measurement
+    */
     if(widget->measure){
        size=widget->measure(widget,widget->constraint); 
        
@@ -1005,14 +1229,16 @@ void ui_widget_measure(UI_Widget* widget){
     /*
     Otherwise,Containers can measure themselves from their children
     */
-    if(widget->object.children.count==0){
-        return;
-    }
-    if(widget->layout_type!=UI_LAYOUT_NONE){
+   
+    if(widget->object.children.count>0 && widget->layout_type!=UI_LAYOUT_NONE){
          size=ui_widget_measure_children(widget);
         
     }
+    /*
+    *Apply measurement constraints
+    */
     size=ui_widget_clamp_measure_size(size,widget->constraint);
+    //Commit result;
     widget->measured_size=size;
     widget->measure_dirty=false;
     return;
@@ -1033,11 +1259,15 @@ void ui_widget_measure_tree(UI_Widget* widget,UI_SizeConstraints constraints){
    
    
    */
-  size_t capacity=16;
-  size_t count=0;
+ 
+  size_t stack_capacity=16;
+  size_t order_capacity=16;
+ 
+ size_t stack_count=0;
+ size_t order_count=0;
 
-  UI_Widget** stack=malloc(capacity * sizeof(UI_Widget*));
-  UI_Widget** order=malloc(capacity * sizeof(UI_Widget*));
+  UI_Widget** stack=malloc(stack_capacity * sizeof(UI_Widget*));
+  UI_Widget** order=malloc(order_capacity * sizeof(UI_Widget*));
 
   if(!stack || !order){
     free(stack);
@@ -1046,13 +1276,15 @@ void ui_widget_measure_tree(UI_Widget* widget,UI_SizeConstraints constraints){
     order=NULL;
     return;
   }
-  stack[count++]=widget;
-  size_t order_count=0;
-  while(count>0){
-    UI_Widget* curr_widget=stack[--count];
+  stack[stack_count++]=widget;
+  /*
+  Build preorder traversal
+  */
+  while(stack_count>0){
+    UI_Widget* curr_widget=stack[--stack_count];
     if(!curr_widget) continue;
-    if(order_count>= capacity){
-        size_t new_capacity=capacity*2;
+    if(order_count>= order_capacity){
+        size_t new_capacity=order_capacity*2;
         UI_Widget** new_order=realloc(order,new_capacity*sizeof(UI_Widget*));
         if(!new_order){
             free(stack);
@@ -1063,16 +1295,21 @@ void ui_widget_measure_tree(UI_Widget* widget,UI_SizeConstraints constraints){
             new_order=NULL;
         }
         order=new_order;
-        capacity=new_capacity;
+        order_capacity=new_capacity;
     }
     order[order_count++]=curr_widget;
+    /*
+    Add visible children 
+    */
     for(size_t i=0;i<curr_widget->object.children.count;i++){
         UI_Widget* child=(UI_Widget*)curr_widget->object.children.objects[i];
         if(!child) continue;
         if(!child->state.visible) continue;
-
-        if(count>=capacity){
-            size_t new_capacity=capacity*2;
+        /*
+         Grow Stack independently
+        */
+        if(stack_count>=stack_capacity){
+            size_t new_capacity=stack_capacity*2;
             UI_Widget** new_stack=realloc(stack,new_capacity*sizeof(UI_Widget*));
             if(!new_stack){
                 free(stack);
@@ -1081,11 +1318,12 @@ void ui_widget_measure_tree(UI_Widget* widget,UI_SizeConstraints constraints){
                 stack=NULL;
                 order=NULL;
                 new_stack=NULL;
+                return;
             }
             stack=new_stack;
-            capacity=new_capacity;
+            stack_capacity=new_capacity;
         }
-        stack[count++]=child;
+        stack[stack_count++]=child;
     }
   }
   /*
@@ -1174,6 +1412,7 @@ UI_Size ui_widget_get_measure_size(const UI_Widget* widget){
     UI_Size size={0.0f,0.0f};
     if(!widget) return size;
     
+    //Width
     if(widget->width_mode==UI_SIZE_FIXED){
         size.width=widget->preferred_size.width;
     }
@@ -1181,7 +1420,9 @@ UI_Size ui_widget_get_measure_size(const UI_Widget* widget){
         size.width=widget->measured_size.width;
     }
     else if(widget->width_mode==UI_SIZE_FILL){
-        size.width=0.0f;
+        size.width=0.0f; /*
+        Fill is resolved by it's parent layout
+        */
     }
     if(widget->height_mode==UI_SIZE_FIXED){
         size.height=widget->preferred_size.height;
@@ -1221,21 +1462,8 @@ void ui_widget_set_constraints(UI_Widget* widget,const float min_width,const flo
     return;
 }
 
-static float ui_widget_clamp_measure_dimension(float size,float min,float max){
-    if(size< min){
-        size=min;
-    }
-    if(max> 0.0 && size>max){
-        size=max;
-    }
-    return size;
-}
-static UI_Size ui_widget_clamp_measure_size(UI_Size size,UI_SizeConstraints constraint){
-    size.width=ui_widget_clamp_measure_dimension(size.width,constraint.min_width,constraint.max_width);
-    size.height=ui_widget_clamp_measure_dimension(size.height,constraint.min_height,constraint.max_height);
 
-    return size;
-}
+
 void ui_widget_mark_measure_dirty(UI_Widget* widget){
     if(!widget) return;
 
@@ -1263,133 +1491,12 @@ void ui_widget_mark_layout_dirty(UI_Widget* widget){
     return;
 }
 
-static UI_SizeConstraints ui_widget_make_child_constraints(UI_Widget* parent,UI_Widget* child){
-    UI_SizeConstraints constraints={
-        0.0f,
-        0.0f,
-        0.0f,
-        0.0f
-    };
-    if(!parent || !child) return constraints;
 
-    float available_width=parent->constraint.max_width;
-    float available_height=parent->constraint.max_height;
 
-    if(available_width>0.0f){
-        available_width-=parent->padding.left+parent->padding.right;
-        if(available_width<0.0f) available_width=0.0f;
-    }
-    if(available_height>0.0f){
-        available_height-=parent->padding.top+parent->padding.bottom;
-        if(available_height) available_height=0.0f;
-    }
-    if(parent->layout_type==UI_LAYOUT_VERTICAL){
-        constraints.max_width=available_width;
-        constraints.max_height=0.0f;
-    }
-    else if(parent->layout_type==UI_LAYOUT_HORIZONTAL){
-        constraints.max_height=available_height;
-        constraints.max_width=0.0f;
-    }
-    else{
-        constraints.max_width=available_width;
-        constraints.max_height=available_height;
-    }
-    constraints.min_width=child->size_limits.min_width;
-    constraints.min_height=child->size_limits.min_height;
-
-    if(child->size_limits.max_width>0.0){
-        if(constraints.max_width==0.0f || child->size_limits.max_width<constraints.max_width){
-            constraints.max_width=child->size_limits.max_width;
-        }
-    }
-    if(child->size_limits.max_height>0.0){
-        if(constraints.max_height==0.0f || child->size_limits.max_height<constraints.max_height){
-            constraints.max_height=child->size_limits.max_height;
-        }
-    }
-    if(child->width_mode== UI_SIZE_FIXED){
-        constraints.min_width=child->preferred_size.width;
-        constraints.max_width=child->preferred_size.width;
-    }
-    if(child->height_mode==UI_SIZE_FIXED){
-        constraints.min_height=child->preferred_size.height;
-        constraints.max_height=child->preferred_size.height;
-    }
-    if(constraints.max_width>0.0f && constraints.max_width< constraints.min_width){
-        constraints.max_width=constraints.min_width;
-    }
-    if(constraints.max_height>0.0f && constraints.max_height<constraints.min_height){
-        constraints.max_height=constraints.min_height;
-    }
-    return constraints;
-
-}
-static void ui_widget_propagate_measure_constraints(UI_Widget* root,UI_SizeConstraints constraints){
-    if(!root) return;
-
-    size_t capacity=16;
-    size_t count=0;
-
-    UI_Widget** stack=malloc(capacity * sizeof(UI_Widget*));
-
-    if(!stack){
-        free(stack);
-        return;
-    }
-    root->constraint=constraints;
-
-    stack[count++] =root;
-
-    while(count > 0){
-        UI_Widget* widget=stack[--count];
-       if(!widget) continue;
-       if(!widget->state.visible) continue;
-       if(widget->object.children.count==0) continue;
-
-       for(size_t i=0;i<widget->object.children.count;i++){
-         UI_Widget* child=(UI_Widget*)widget->object.children.objects[i];
-         if(child) continue;
-         child->constraint=ui_widget_make_child_constraints(widget,child);
-        if(count>=capacity){
-            size_t new_capacity=capacity*2;
-            UI_Widget** new_stack=realloc(stack,new_capacity*sizeof(UI_Widget*));
-
-            if(new_stack==NULL){
-                free(stack);
-                return;
-            }
-            stack=new_stack;
-            capacity=new_capacity;
-        }
-        stack[count++]=child;
-       }
-    }
-    free(stack);
-    return;
-}
-static void ui_widget_resolve_root_size(UI_Widget* root){
-    if(!root) return;
-
-    if(root->width_mode==UI_SIZE_FIXED){
-        root->rect.width=root->preferred_size.width;
-    }
-    else if(root->width_mode==UI_SIZE_AUTO){
-        root->rect.width=root->measured_size.width;
-    }
-    if(root->height_mode==UI_SIZE_FIXED){
-        root->rect.height=root->preferred_size.height;
-    }
-    else if(root->height_mode==UI_SIZE_AUTO){
-        root->rect.height=root->measured_size.height;
-    }
-    ui_widget_apply_size_limits(root);
-    return;
-}
 
 UI_Widget* ui_widget_find_child_by_index(UI_Widget* parent,size_t index){
     if(!parent) return NULL;
-    if(index>=0 && index<parent->object.children.count){
+    if(index<parent->object.children.count){
         return (UI_Widget*)parent->object.children.objects[index];
     }
    return NULL;

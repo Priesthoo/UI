@@ -48,7 +48,7 @@ struct UI_Padding{
   float bottom;
 };
 
-typedef UI_Padding UI_Padding;
+typedef struct UI_Padding UI_Padding;
  struct UI_Widget{
 struct UI_Object object;
 
@@ -166,7 +166,7 @@ void ui_widget_set_padding(UI_Widget* widget,float top,float bottom,float left,f
 void ui_widget_set_size_mode(UI_Widget* widget,UI_SizeMode width_mode,UI_SizeMode height_mode);
 
 void ui_widget_set_limits(UI_Widget* widget,float min_width,float min_height,float max_width,float max_height);
-
+void ui_widget_apply_size_limits(UI_Widget* widget);
 void ui_widget_set_preferred_size(UI_Widget* widget,float width,float height);
 //Let's measure before we layout the widgets,that is we will seperate the measurement from the layout
 /*
@@ -195,14 +195,15 @@ Fixed uses preferred width or height
 */
 //For measurement,measure self,
 void ui_widget_measure(UI_Widget* widget);
+void ui_widget_measure_self(UI_Widget* widget);
 void ui_widget_measure_tree(UI_Widget* widget,UI_SizeConstraints constraints);
 //Let's the container also measure the children
 UI_Size ui_widget_measure_children(UI_Widget* widget);
 UI_Size ui_widget_get_measure_size(const UI_Widget* widget);
 
 void ui_widget_set_constraints(UI_Widget* widget,const float min_width,const float max_width,const float min_height,const float max_height);
-
-
+void ui_widget_resolve_root_size(UI_Widget* root);
+ UI_Size ui_widget_clamp_measure_size(UI_Size size,UI_SizeConstraints constraint);
 //Mark Dirty that causes redraw of UI_Elements
 void ui_widget_mark_measure_dirty(UI_Widget* widget);
 void ui_widget_mark_layout_dirty(UI_Widget* widget);
