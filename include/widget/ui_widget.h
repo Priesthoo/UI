@@ -8,10 +8,19 @@
 #include<core/ui_point.h>
 #include<event/event.h>
  typedef struct UI_Widget UI_Widget;
+struct UI_SizeLimits{
+  float min_width;
+  float min_height;
+
+  float max_width;
+  float max_height;
+};
+typedef struct UI_SizeLimits UI_SizeLimits;
+typedef UI_SizeLimits UI_SizeConstraints;
 
 typedef void(*UI_WidgetDrawFn)( UI_Widget* widget);
 typedef void(*UI_WidgetLayoutFn)(UI_Widget* widget);
-typedef UI_Size (*UI_WidgetMeasureFn)(UI_Widget* widget);
+typedef UI_Size (*UI_WidgetMeasureFn)(UI_Widget* widget,UI_SizeConstraints constraint);
 
 typedef enum{
  UI_LAYOUT_NONE,
@@ -31,34 +40,27 @@ UI_SIZE_FILL,
 UI_SIZE_AUTO
 }UI_SizeMode;
 
-struct UI_SizeLimits{
-  float min_width;
-  float min_height;
 
-  float max_width;
-  float max_height;
-};
 struct UI_Padding{
   float left;
   float top;
   float right;
   float bottom;
 };
-typedef struct UI_SizeLimits UI_SizeLimits;
-typedef UI_SizeLimits UI_SizeConstraints;
+
 typedef UI_Padding UI_Padding;
  struct UI_Widget{
 struct UI_Object object;
 
 UI_Rect rect; //the current 
-UI_Size preferred_size;
-
+UI_Size preferred_size; //use when UI_SIZE_FIXED is used
+UI_Size measured_size; //use when UI_SIZE_AUTO is used
  UI_WidgetState state; //the current widget state
  UI_WidgetEventFn event;
  UI_WidgetDrawFn draw;
  UI_WidgetLayoutFn layout;
  UI_WidgetMeasureFn measure;  //this is used to determine measured size from the content of the widget
-
+ 
  UI_LayoutType layout_type;
  float layout_spacing;
 
@@ -71,6 +73,10 @@ UI_Size preferred_size;
  UI_SizeMode height_mode; 
  
   UI_SizeLimits size_limits;
+  UI_SizeConstraints constraint;
+
+  bool layout_dirty;
+  bool measure_dirty;
 };
 int ui_widget_children_count(const struct UI_Widget* widget);
 //For widget creation
@@ -103,6 +109,9 @@ int ui_widget_add_child(struct UI_Widget* parent,struct UI_Widget* child);
 
 int ui_widget_remove_child(struct UI_Widget* parent,struct UI_Widget* child);
 
+//Children traversal
+UI_Widget* ui_widget_find_child_by_index(UI_Widget* parent,size_t index);
+int ui_widget_get_index_by_child(UI_Widget* parent,UI_Widget* child);
 //For getting keyboard focus and widget state
 void ui_widget_set_enabled(struct UI_Widget* widget,bool state);
 bool ui_widget_is_enabled(const struct UI_Widget* widget);
@@ -186,8 +195,18 @@ Fixed uses preferred width or height
 */
 //For measurement,measure self,
 void ui_widget_measure(UI_Widget* widget);
-void ui_widget_measure_tree(UI_Widget* widget);
+void ui_widget_measure_tree(UI_Widget* widget,UI_SizeConstraints constraints);
 //Let's the container also measure the children
 UI_Size ui_widget_measure_children(UI_Widget* widget);
 UI_Size ui_widget_get_measure_size(const UI_Widget* widget);
+
+void ui_widget_set_constraints(UI_Widget* widget,const float min_width,const float max_width,const float min_height,const float max_height);
+
+
+//Mark Dirty that causes redraw of UI_Elements
+void ui_widget_mark_measure_dirty(UI_Widget* widget);
+void ui_widget_mark_layout_dirty(UI_Widget* widget);
+
+
+
 #endif 
