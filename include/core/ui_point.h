@@ -1,9 +1,10 @@
 #ifndef UI_POINT_H
 #define UI_POINT_H
-typedef struct {
+ struct UI_Point {
   float x;
   float y;
-}UI_Point;
+};
+typedef struct UI_Point UI_Point;
 
 
 
